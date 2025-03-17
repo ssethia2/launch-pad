@@ -4,6 +4,7 @@ import boto3
 import anthropic
 from datetime import datetime
 from uuid import uuid4
+from boto3.dynamodb.conditions import Attr
 from botocore.exceptions import ClientError
 from typing import Optional, Dict, Any
 
@@ -12,7 +13,7 @@ class ProjectGenerator:
         print("Initializing ProjectGenerator...")
         self._init_claude()
         self._init_aws_resources()
-        self.system_prompt = "You are a full stack software developer proficient in designing and implementing on AWS"
+        self.system_prompt = "You are a full stack freelance software developer. You are able to ask for and understand details for software applications from non-technical people. You are proficient in designing and implementing those end-to-end web and mobile applications on AWS, writing the backend in Python and frontend in JavaScript."
         self.max_context_tokens = 3000
         print("ProjectGenerator initialized successfully")
 
@@ -47,51 +48,52 @@ class ProjectGenerator:
         
         self.users_table = self.dynamodb.Table('Users')
         self.projects_table = self.dynamodb.Table('Projects')
-        self.conversation_bucket = 'project_conversation_context'
+        self.conversation_bucket = 'project-conversation-context'
+
         print(f"AWS resources initialized: Users table, Projects table, and S3 bucket {self.conversation_bucket}")
 
-    def get_user(self, user_id: str) -> Optional[Dict[str, Any]]:
+    def get_user(self, email: str) -> Optional[Dict[str, Any]]:
         """Fetch user from DynamoDB"""
-        print(f"Fetching user with ID: {user_id}")
+        print(f"Fetching user with email: {email}")
         try:
-            response = self.users_table.get_item(
-                Key={'userId': user_id}
+            response = self.users_table.scan(
+                FilterExpression=Attr('email').eq(email)
             )
-            user = response.get('Item')
-            if user:
-                print(f"User found: {user_id}")
+            user = response.get('Items')
+            if len(user) > 0:
+                print(f"User found: {user[0]}")
+                return user[0]
             else:
-                print(f"User not found: {user_id}")
-            return user
+                print(f"ser not found:U {email}")
+            return None
         except ClientError as e:
             print(f"Error fetching user: {e}")
             return None
 
-    def create_user(self, user_id: str) -> Dict[str, Any]:
+    def create_user(self, email: str) -> Dict[str, Any]:
         """Create new user in DynamoDB"""
-        print(f"Creating new user with ID: {user_id}")
+        print(f"Creating new user with email: {email}")
         user_item = {
-            'userId': user_id,
-            'createdAt': datetime.utcnow().isoformat(),
-            'status': 'ACTIVE'
+            'userId': str(uuid4()),
+            'email': email,
         }
         try:
             self.users_table.put_item(Item=user_item)
-            print(f"User created successfully: {user_id}")
+            print(f"User created successfully: {email}")
             return user_item
         except ClientError as e:
             print(f"Error creating user: {e}")
             raise
 
-    def get_or_create_user(self, user_id: str) -> Dict[str, Any]:
+    def get_or_create_user(self, email: str) -> Dict[str, Any]:
         """Get existing user or create new one"""
-        print(f"Getting or creating user: {user_id}")
-        user = self.get_user(user_id)
+        print(f"Getting or creating user: {email}")
+        user = self.get_user(email)
         if not user:
-            user = self.create_user(user_id)
+            user = self.create_user(email)
         return user
 
-    def get_project(self, project_id: str, user_id: str) -> Optional[Dict[str, Any]]:
+    def get_project(self, user_id: str, project_id: str) -> Optional[Dict[str, Any]]:
         """Fetch project from DynamoDB"""
         print(f"Fetching project: {project_id} for user: {user_id}")
         try:
@@ -104,12 +106,40 @@ class ProjectGenerator:
             project = response.get('Item')
             if project:
                 print(f"Project found: {project_id}")
+                return project
             else:
                 print(f"Project not found: {project_id}")
-            return project
+            return None
         except ClientError as e:
             print(f"Error fetching project: {e}")
             return None
+
+
+    def create_project(self, user_id: str, project_id: str) -> Dict[str, Any]:
+        """Create new project in DynamoDB"""
+        print(f"Creating new project for user: {user_id}")
+        project_item = {
+            'userId': user_id,
+            'projectId': project_id,
+            'createdAt': datetime.utcnow().isoformat(),
+            'updatedAt': datetime.utcnow().isoformat()
+        }
+        try:
+            self.projects_table.put_item(Item=project_item)
+            print(f"Project created successfully: {project_item}")
+            return project_item
+        except ClientError as e:
+            print(f"Error creating project: {e}")
+            raise
+
+
+    def get_or_create_project(self, user_id, project_id: str) -> Dict[str, Any]:
+        """Get existing project or create new one"""
+        print(f"Getting or creating project: {user_id, project_id}")
+        project = self.get_project(user_id, project_id)
+        if not project:
+            project = self.create_project(user_id, project_id)
+        return project
 
     def get_conversation_context(self, user_id: str, project_id: str) -> Dict[str, Any]:
         """Get conversation context from S3 or create new one"""
@@ -125,47 +155,38 @@ class ProjectGenerator:
             conversation = json.loads(response['Body'].read())
             print(f"Existing conversation found with {len(conversation['messages'])} messages")
             
-            # Estimate tokens (rough approximation)
-            total_tokens = sum(len(msg['content'].split()) * 1.3 for msg in conversation['messages'])
-            print(f"Estimated token count in conversation: {total_tokens}")
+            # # Estimate tokens (rough approximation)
+            # total_tokens = sum(len(msg['content'].split()) * 1.3 for msg in conversation['messages'])
+            # print(f"Estimated token count in conversation: {total_tokens}")
             
-            # Trim to stay within token limit
-            if total_tokens > self.max_context_tokens:
-                print(f"Trimming conversation to stay within {self.max_context_tokens} token limit")
-                # Start removing oldest messages until we're under the limit
-                while total_tokens > self.max_context_tokens and len(conversation['messages']) > 2:
-                    removed_msg = conversation['messages'].pop(0)
-                    removed_tokens = len(removed_msg['content'].split()) * 1.3
-                    total_tokens -= removed_tokens
-                    print(f"Removed message with ~{removed_tokens} tokens, new total: {total_tokens}")
+            # # Trim to stay within token limit
+            # if total_tokens > self.max_context_tokens:
+            #     print(f"Trimming conversation to stay within {self.max_context_tokens} token limit")
+            #     # Start removing oldest messages until we're under the limit
+            #     while total_tokens > self.max_context_tokens and len(conversation['messages']) > 2:
+            #         removed_msg = conversation['messages'].pop(0)
+            #         removed_tokens = len(removed_msg['content'].split()) * 1.3
+            #         total_tokens -= removed_tokens
+            #         print(f"Removed message with ~{removed_tokens} tokens, new total: {total_tokens}")
             
             return conversation
         except self.s3.exceptions.NoSuchKey:
             # Create new conversation if it doesn't exist
             print(f"No existing conversation found, creating new one")
             return {
-                'messages': [],
-                'createdAt': datetime.utcnow().isoformat(),
-                'updatedAt': datetime.utcnow().isoformat()
+                'messages': []
             }
         except ClientError as e:
             print(f"Error getting conversation context: {e}")
             raise
 
-    def append_conversation(self, user_id: str, project_id: str, new_message: dict) -> Dict[str, Any]:
+    def append_conversation(self, user_id: str, project: dict, conversation: dict) -> Dict[str, Any]:
         """Append to conversation in S3"""
+        project_id = project['projectId']
         s3_key = f'{user_id}/{project_id}/conversation.json'
         print(f"Appending message to conversation: {s3_key}")
-        print(f"Message role: {new_message['role']}, content length: {len(new_message['content'])}")
         
         try:
-            # Get existing conversation or create new one
-            conversation = self.get_conversation_context(user_id, project_id)
-            
-            # Append new message
-            conversation['messages'].append(new_message)
-            conversation['updatedAt'] = datetime.utcnow().isoformat()
-            
             # Store updated conversation
             print(f"Storing updated conversation with {len(conversation['messages'])} messages")
             self.s3.put_object(
@@ -174,21 +195,18 @@ class ProjectGenerator:
                 Body=json.dumps(conversation)
             )
 
-            # Update S3 location in projects table if it's the first message
-            if len(conversation['messages']) == 1:
-                print(f"First message in conversation, updating project with S3 location")
-                self.projects_table.update_item(
-                    Key={
-                        'projectId': project_id,
-                        'userId': user_id
-                    },
-                    UpdateExpression='SET conversationLocation = :loc, updatedAt = :timestamp',
-                    ExpressionAttributeValues={
-                        ':loc': f's3://{self.conversation_bucket}/{s3_key}',
-                        ':timestamp': datetime.utcnow().isoformat()
-                    }
-                )
-                print(f"Project updated with conversation location")
+            self.projects_table.update_item(
+                Key={
+                    'projectId': project_id,
+                    'userId': user_id
+                },
+                UpdateExpression='SET conversationLocation = :loc, updatedAt = :timestamp',
+                ExpressionAttributeValues={
+                    ':loc': f's3://{self.conversation_bucket}/{s3_key}',
+                    ':timestamp': datetime.utcnow().isoformat()
+                }
+            )
+            print(f"Project updated with conversation location")
 
             return conversation
         except ClientError as e:
@@ -218,13 +236,10 @@ class ProjectGenerator:
             print(f"Error updating project status: {e}")
             raise
 
-    def generate_response(self, user_id: str, project_id: str, user_input: str) -> str:
+    def generate_response(self, user_id: str, project: dict, conversation: dict) -> str:
         """Generate response using Claude with conversation context"""
+        project_id = project['projectId']
         print(f"Generating Claude response for project: {project_id}")
-        
-        # Get conversation context
-        # conversation = self.get_conversation_context(user_id, project_id)
-        conversation = {'messages':[]}
         
         # Prepare messages for Claude
         claude_messages = []
@@ -236,18 +251,12 @@ class ProjectGenerator:
                 "content": msg["content"]
             })
         
-        # Add new user message
-        claude_messages.append({
-            "role": "user",
-            "content": user_input
-        })
-        
         print(f"Sending request to Claude with {len(claude_messages)} messages")
         try:
             # Call Claude API
             response = self.claude.messages.create(
                 model="claude-3-5-sonnet-20241022",
-                max_tokens=4096,
+                max_tokens=3000,
                 system=self.system_prompt,
                 messages=claude_messages
             )
@@ -255,17 +264,6 @@ class ProjectGenerator:
             # Get assistant's response
             assistant_response = response.content[0].text
             print(f"Received response from Claude, ", response.content)
-            
-            # Add assistant's response to conversation
-            self.append_conversation(
-                user_id,
-                project_id,
-                {
-                    "role": "assistant",
-                    "content": assistant_response,
-                    "timestamp": datetime.utcnow().isoformat()
-                }
-            )
             
             return assistant_response
         except Exception as e:
@@ -276,11 +274,11 @@ def lambda_handler(event, context):
     print(f"Lambda invoked with event: {json.dumps(event)}")
     try:
         # Validate input
-        if 'userId' not in event:
-            print("Error: userId is required")
+        if 'email' not in event:
+            print("Error: email is required")
             return {
                 'statusCode': 400,
-                'body': json.dumps({'error': 'userId is required'})
+                'body': json.dumps({'error': 'email is required'})
             }
         
         if 'input' not in event:
@@ -290,48 +288,46 @@ def lambda_handler(event, context):
                 'body': json.dumps({'error': 'user input is required'})
             }
 
-        user_id = event['userId']
+        email = event['email']
         user_input = event['input']
-        project_id = event.get('projectId', str(uuid4()))
-        is_new_project = 'projectId' not in event
+        project_id = event.get('project_id', str(uuid4()))
         
-        print(f"Processing request for user: {user_id}, project: {project_id}, new project: {is_new_project}")
+        print(f"Processing request for user: {email}, project: {project_id}")
 
         generator = ProjectGenerator()
         
         # Validate/create user
-        # user = generator.get_or_create_user(user_id)
+        user = generator.get_or_create_user(email)
+        user_id = user['userId']
 
-        # For new projects, create project record
-        # if is_new_project:
-        #     print(f"Creating new project: {project_id}")
-        #     generator.projects_table.put_item(
-        #         Item={
-        #             'projectId': project_id,
-        #             'userId': user_id,
-        #             'description': user_input[:100],  # First 100 chars as description
-        #             'status': 'IN_PROGRESS',
-        #             'createdAt': datetime.utcnow().isoformat(),
-        #             'updatedAt': datetime.utcnow().isoformat()
-        #         }
-        #     )
-        #     print(f"New project created successfully")
+        # # For new projects, create project record
+        project = generator.get_or_create_project(user_id, project_id)
         
+        # Get existing conversation or create new one
+        conversation = generator.get_conversation_context(user_id, project_id)
+
         # Add user message to conversation
-        # print(f"Adding user message to conversation")
-        # generator.append_conversation(
-        #     user_id,
-        #     project_id,
-        #     {
-        #         "role": "user",
-        #         "content": user_input,
-        #         "timestamp": datetime.utcnow().isoformat()
-        #     }
-        # )
-        
+        print(f"Adding user message to conversation")
+        conversation['messages'].append(
+            {
+                "role": "user",
+                "content": user_input,
+                "timestamp": datetime.utcnow().isoformat()
+            }
+        )
+
         # Generate response
         print(f"Generating response from Claude")
-        assistant_response = generator.generate_response(user_id, project_id, user_input)
+        assistant_response = generator.generate_response(user_id, project, conversation)
+        conversation['messages'].append(
+            {
+                "role": "assistant",
+                "content": assistant_response,
+                "timestamp": datetime.utcnow().isoformat()
+            }
+        )
+
+        generator.append_conversation(user_id, project, conversation)
         
         print(f"Request processed successfully, returning response")
         return {
@@ -354,5 +350,5 @@ def lambda_handler(event, context):
         }
     
 if __name__ == '__main__':
-    test_event = {'userId': 'test-user-123', 'input': 'I want to build a simple todo app with React frontend and Python backend'}
+    test_event = {'email': 'satviksethia@gmail.com', 'project_id': 'compliapp', 'input': 'I want to create an app for LLC compliance in India. It will be a web and mobile application, with two personas that can log in - compliance professional or director. Directors can access the application by being referred by compliance professionals. Each can initiate a service, which corresponds to a form that needs to be filled. The form inputs required by each persona will be static and saved somewhere. Directors can be associated to multiple LLCs. We will need sign up for compliance professionals, sign in through referrals for directors, actions available to each persona at any given point, and a notification system when there is a pending action for any user. Give me a high level overview and steps on how to go about creating this application.'}
     lambda_handler(test_event, {})
